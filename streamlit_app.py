@@ -1,118 +1,121 @@
 import streamlit as st
 import pandas as pd
 import datetime
+import os
 
 def get_festivita_italiane(anno):
-    """Calcola le festività nazionali italiane per l'anno selezionato."""
+    """Calcola le festività nazionali italiane."""
     festivita = [
-        datetime.date(anno, 1, 1),   # Capodanno
-        datetime.date(anno, 1, 6),   # Epifania
-        datetime.date(anno, 4, 25),  # Liberazione
-        datetime.date(anno, 5, 1),   # Lavoro
-        datetime.date(anno, 6, 2),   # Repubblica
-        datetime.date(anno, 8, 15),  # Ferragosto
-        datetime.date(anno, 11, 1),  # Ognissanti
-        datetime.date(anno, 12, 8),  # Immacolata
-        datetime.date(anno, 12, 25), # Natale
-        datetime.date(anno, 12, 26), # S. Stefano
+        datetime.date(anno, 1, 1), datetime.date(anno, 1, 6),
+        datetime.date(anno, 4, 25), datetime.date(anno, 5, 1),
+        datetime.date(anno, 6, 2), datetime.date(anno, 8, 15),
+        datetime.date(anno, 11, 1), datetime.date(anno, 12, 8),
+        datetime.date(anno, 12, 25), datetime.date(anno, 12, 26),
     ]
-    
-    # Algoritmo di Butcher per la Pasqua
-    a = anno % 19
-    b = anno // 100
-    c = anno % 100
-    d = b // 4
-    e = b % 4
+    # Pasquetta
+    a, b, c = anno % 19, anno // 100, anno % 100
+    d, e = b // 4, b % 4
     f = (b + 8) // 25
     g = (b - f + 1) // 3
     h = (19 * a + b - d - g + 15) % 30
-    i = c // 4
-    k = c % 4
+    i, k = c // 4, c % 4
     l = (32 + 2 * e + 2 * i - h - k) % 7
     m = (a + 11 * h + 22 * l) // 451
     mese_p = (h + l - 7 * m + 114) // 31
     giorno_p = ((h + l - 7 * m + 114) % 31) + 1
-    pasquetta = datetime.date(anno, mese_p, giorno_p) + datetime.timedelta(days=1)
-    festivita.append(pasquetta)
+    festivita.append(datetime.date(anno, mese_p, giorno_p) + datetime.timedelta(days=1))
     return festivita
 
 def assegna_fascia(row, festivita):
-    data = row['Data_Completa']
-    giorno_sett = data.weekday() 
-    ora = data.hour
-    
-    # F3: Domeniche e Festivi
-    if giorno_sett == 6 or data.date() in festivita:
+    # L'ora nel file GME è 1-24. Python datetime usa 0-23.
+    ora_zero_based = int(row['Ora']) - 1
+    data_obj = row['Data_Obj']
+    giorno_sett = data_obj.weekday() # 0=Lun, 6=Dom
+
+    if giorno_sett == 6 or data_obj in festivita:
         return 'F3'
-    # Sabato
     if giorno_sett == 5:
-        return 'F2' if 7 <= ora < 23 else 'F3'
-    # Feriali
-    if 8 <= ora < 19:
+        return 'F2' if 7 <= ora_zero_based < 23 else 'F3'
+    if 8 <= ora_zero_based < 19:
         return 'F1'
-    elif ora == 7 or 19 <= ora < 23:
+    elif ora_zero_based == 7 or 19 <= ora_zero_based < 23:
         return 'F2'
     else:
         return 'F3'
 
-st.title("GME Excel Fasce Analyzer (2004-2026)")
+@st.cache_data
+def load_data_from_repo(anno):
+    """Carica il file Excel dal repository in base all'anno."""
+    # Gestione nomi file: i file dal 2025 hanno granularità 15 min
+    if anno >= 2025:
+        filename = f"Anno {anno}_12_15.xlsx"
+    else:
+        filename = f"Anno {anno}_12.xlsx" # Formato orario standard
+    
+    if os.path.exists(filename):
+        df = pd.read_excel(filename)
+        df.columns = [str(c).replace('\n', ' ').strip() for c in df.columns]
+        return df
+    return None
+
+st.set_page_config(page_title="GME Fasce Analyzer", layout="wide")
+st.title("Analizzatore Storico GME (2004-2026)")
 
 # Sidebar per filtri
 with st.sidebar:
+    st.header("Seleziona Periodo")
     anno_sel = st.selectbox("Anno", list(range(2026, 2003, -1)))
     mese_sel = st.selectbox("Mese", list(range(1, 13)))
+    st.info("I file vengono letti direttamente dalla cartella del repository.")
 
-uploaded_file = st.file_uploader("Carica file Excel GME", type=['xlsx'])
+# Caricamento automatico
+df_raw = load_data_from_repo(anno_sel)
 
-if uploaded_file:
+if df_raw is not None:
     try:
-        # Legge il file Excel. Il GME solitamente ha i dati nel primo foglio.
-        # Spesso i dati iniziano dopo alcune righe di disclaimer (es. skipfooter/header)
-        df = pd.read_excel(uploaded_file)
-        
-        # Pulizia nomi colonne
-        df.columns = [str(c).replace('\n', ' ').strip() for c in df.columns]
-        
-        # Mapping colonne GME standard
         col_data = "Data/Date (YYYYMMDD)"
         col_ora = "Ora /Hour"
         col_pun = "PUN INDEX GME"
 
-        if col_data in df.columns:
-            # Conversione date e ore
-            df['Data_Str'] = df[col_data].astype(str)
-            df['Ora_Adj'] = df[col_ora].astype(int) - 1
-            df['Data_Completa'] = pd.to_datetime(df['Data_Str'], format='%Y%m%d') + \
-                                  pd.to_timedelta(df['Ora_Adj'], unit='h')
+        # Trasformazione date e filtri
+        df_raw['Data_DT'] = pd.to_datetime(df_raw[col_data].astype(str), format='%Y%m%d')
+        df_mese = df_raw[df_raw['Data_DT'].dt.month == mese_sel].copy()
 
-            # Filtro temporale
-            mask = (df['Data_Completa'].dt.year == anno_sel) & (df['Data_Completa'].dt.month == mese_sel)
-            df_mese = df.loc[mask].copy()
-
-            if df_mese.empty:
-                st.warning(f"Dati non trovati per {mese_sel}/{anno_sel}")
-            else:
-                festivita = get_festivita_italiane(anno_sel)
-                df_mese['Fascia'] = df_mese.apply(lambda r: assegna_fascia(r, festivita), axis=1)
-
-                # Calcolo Medie
-                res = {
-                    "F0 (PUN Medio)": df_mese[col_pun].mean(),
-                    "F1": df_mese[df_mese['Fascia'] == 'F1'][col_pun].mean(),
-                    "F2": df_mese[df_mese['Fascia'] == 'F2'][col_pun].mean(),
-                    "F3": df_mese[df_mese['Fascia'] == 'F3'][col_pun].mean()
-                }
-
-                st.subheader(f"Analisi Prezzi {mese_sel}/{anno_sel}")
-                
-                # Visualizzazione in tabella
-                final_df = pd.DataFrame(res.items(), columns=['Parametro', '€/MWh'])
-                final_df['€/kWh'] = final_df['€/MWh'] / 1000
-                st.table(final_df.style.format({'€/MWh': '{:.2f}', '€/kWh': '{:.5f}'}))
-                
-                st.line_chart(df_mese.set_index('Data_Completa')[col_pun])
+        if df_mese.empty:
+            st.warning(f"Nessun dato trovato per {mese_sel}/{anno_sel}")
         else:
-            st.error("Formato colonne non riconosciuto. Verifica che il file sia un report prezzi GME.")
+            df_mese['Data_Obj'] = df_mese['Data_DT'].dt.date
+            df_mese['Ora'] = df_mese[col_ora]
+            
+            festivita = get_festivita_italiane(anno_sel)
+            df_mese['Fascia'] = df_mese.apply(lambda r: assegna_fascia(r, festivita), axis=1)
+
+            # Calcolo Medie
+            f1 = df_mese[df_mese['Fascia'] == 'F1'][col_pun].mean()
+            f2 = df_mese[df_mese['Fascia'] == 'F2'][col_pun].mean()
+            f3 = df_mese[df_mese['Fascia'] == 'F3'][col_pun].mean()
+            f0 = df_mese[col_pun].mean()
+
+            st.header(f"Riepilogo {mese_sel}/{anno_sel}")
+            
+            # Tabella Risultati
+            res_df = pd.DataFrame({
+                "Parametro": ["F0 (PUN Medio)", "F1", "F2", "F3"],
+                "€/MWh": [f0, f1, f2, f3],
+                "€/kWh": [f0/1000, f1/1000, f2/1000, f3/1000]
+            })
+            st.table(res_df.style.format({'€/MWh': '{:.2f}', '€/kWh': '{:.5f}'}))
+
+            # Dettaglio PUN Orario
+            st.subheader("Andamento PUN Orario")
+            # Per i file a 15 min, aggreghiamo per avere il valore orario
+            pun_orario = df_mese.groupby([col_data, 'Ora', 'Fascia'])[col_pun].mean().reset_index()
+            pun_orario.columns = ['Data', 'Ora', 'Fascia', 'PUN_Orario_MWh']
+            
+            st.line_chart(pun_orario.set_index('Ora')['PUN_Orario_MWh'])
+            st.dataframe(pun_orario, use_container_width=True)
 
     except Exception as e:
-        st.error(f"Errore: {e}")
+        st.error(f"Errore nell'elaborazione dei dati: {e}")
+else:
+    st.error(f"File non trovato nel repository per l'anno {anno_sel}. Verificare la presenza del file Excel.")
